@@ -1,0 +1,11 @@
+ит > it
+1с > 1c
+с++ > c++
+веб > web
+2д > 2d
+3д > 3d
+js > javascript
+java script > javascript
+ms sql > mssql
+postgres > postgresql
+~битрикс > bitrix

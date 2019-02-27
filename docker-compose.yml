@@ -1,0 +1,63 @@
+version: '3'
+services:
+
+  mysql:
+    image: mariadb:latest
+    restart: always
+    ports:
+      - "3306:3306"
+    volumes:
+      - "mysql:/var/lib/mysql"
+      - "./etc/my.cnf:/etc/mysql/conf.d/my.cnf"
+      - "./etc/fixtures:/docker-entrypoint-initdb.d"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=test
+      - MYSQL_USER=sphinx
+      - MYSQL_PASSWORD=sphinx
+
+  sphinx:
+    image: macbre/sphinxsearch:3.1.1
+    restart: always
+    ports:
+      - "9306:9306"
+      - "9307:9307"
+      - "9308:9308"
+      - "9312:9312"
+    volumes:
+      - "sphinx:/opt/sphinx/index"
+      - "./etc/sphinx.conf:/opt/sphinx/conf/sphinx.conf"
+
+  rsync:
+    image: axiom/rsync-server
+    restart: always
+    ports:
+      - "873:873"
+    volumes:
+      - "sphinx:/data"
+    environment:
+      - USERNAME=sphinx
+      - PASSWORD=sphinx
+      - VOLUME=/data
+
+  river:
+    build: './'
+    image: narkq/go-mysql-sphinx-example
+    restart: always
+    ports:
+      - "12801:12801"
+    volumes:
+      - "river:/var/river"
+      - "./etc/river.toml:/etc/go-mysql-sphinx/river.toml"
+      - "./etc/dict:/etc/go-mysql-sphinx/dict"
+    depends_on:
+      - mysql
+      - sphinx
+      - rsync
+    environment:
+      - RSYNC_PASSWORD=sphinx
+
+volumes:
+  mysql:
+  river:
+  sphinx:

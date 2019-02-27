@@ -1,0 +1,199 @@
+# MySQL address, user and password
+# user must have REPLICATION CLIENT and REPLICATION SLAVE privileges
+my_addr = "127.0.0.1:3306"
+my_user = "sphinx"
+my_pass = "sphinx"
+my_charset = "utf8mb4"
+
+# list of Sphinx servers
+sph_addr = [
+    "127.0.0.1:9306",
+]
+
+stat_addr = "0.0.0.0:12801"
+
+# this is necessary for slave registration
+# make sure it differs from server_id of your MySQL servers
+server_id = 10001
+
+# mysql or mariadb
+flavor = "mariadb"
+
+# period to be set via @master_heartbeat_period
+heartbeat_period = "5s"
+
+# if not empty, will run mysqldump and translate the output to replication events
+mysqldump = ""
+
+# do not use --master-data flag when running mysqldump
+skip_master_data = false
+
+# ignore saved state from Sphinx
+skip_sph_sync_state = false
+
+# how often we should try to flush changes to Sphinx (0 means after every finished transaction)
+flush_bulk_time = "1000ms"
+
+# document must have no changes at least this long before its changes is flushed to Sphinx
+min_time_after_last_event = "1s"
+# maximum allowed time to hold document changes in the queue
+max_time_after_first_event = "10s"
+
+# folder to store upstream position and index files
+data_dir = "./var/river"
+
+replay_full_binlog = false
+
+use_gtid = true
+
+[sph_conn_settings]
+  disconnect_retry_delay = "1s"
+  overload_retry_delay = "1m"
+
+[balancer]
+  addr = []
+  backend = []
+  pause_after_disabling = "0"
+  pause_before_enabling = "0"
+  timeout = "10s"
+  use_tls = false
+  server_ca_file = ""
+  client_cert_file = ""
+  client_key_file = ""
+  tls_server_name = ""
+
+[maintenance]
+  optimize_schedule = ""
+  rebuild_schedule = ""
+  max_ram_chunk_bytes = 10485760
+
+# Template of a command to upload an index to each Sphinx server.
+# Available variables:
+#
+#   BuildID
+#   DataDir
+#   Index
+#   Host
+#
+# Any program/script which takes a file list from stdin and uploads files to Sphinx data folder will do.
+[index_uploader]
+  executable = "rsync"
+  arguments = [
+    "--files-from=-",
+    "--log-file=<<.DataDir>>/rsync.<<.Host>>.log",
+    "--no-relative",
+    "--times",
+    "--delay-updates",
+    ".",
+    "rsync://sphinx@<<.Host>>:873/volume/",
+  ]
+
+# when uploading index files, you can replace the host name for all or some of Sphinx servers
+# (useful when uploading is done via the different network interface)
+[index_uploader.host_map]
+  sphinx = "rsync"
+
+# replication event routing rules
+# see fixtures/test.sql file for an example tables, data, etc.
+
+# rules for vacancy "active" index
+[[ingest]]
+  table = "test.vacancy"
+  id_field = "id"
+  index = "vacancy"
+  [ingest.column_map]
+    country_id = ["country_id", "country_text"]
+    region_id = [ "region_id", "region_text" ]
+    town_id = [ "country_id", "region_id", "town_id", "town_text", "region_text", "country_text" ]
+    payment_from = [ "payment_from", "payment_text" ]
+    payment_to = [ "payment_to", "payment_text" ]
+    profession = [ "profession_text" ]
+    description = [ "description_text" ]
+    latitude = [ "latitude_deg", "latitude_rad" ]
+    longitude = [ "longitude_deg", "longitude_rad" ]
+    created_at = [ "created_at" ]
+    updated_at = [ "updated_at" ]
+
+[[ingest]]
+  table = "test.vacancy_language"
+  id_field = "vacancy_id"
+  index = "vacancy"
+  [ingest.column_map]
+    language_id = [ "languages" ]
+    language_level = [ "languages" ]
+
+[[ingest]]
+  table = "test.vacancy_catalogue"
+  id_field = "vacancy_id"
+  index = "vacancy"
+  [ingest.column_map]
+    catalogue_id = [ "catalogues", "catalogues_top" ]
+
+# `data_source` maps index name to a data source.
+# `query` must be a valid SELECT query that returns a dataset for the index;
+# each field of that query must have an alias that is formatted like `field_name:field_type`,
+# where `field_name` and `field_type` refer to the name and type of that field in the index.
+# If `parts` is greater that 1, then index is assumed to be partitioned into several parts by document id.
+# `indexer` field contains various indexer-related settings (see Sphinx docs for details).
+
+# data source for vacancy index
+[data_source.vacancy]
+  parts = 2
+  query = """
+SELECT
+    v.id `:id`,
+    IF(r.country_id IS NOT NULL, r.country_id, 0) AS `country_id:attr_uint`,
+    IF(t.region_id IS NOT NULL, t.region_id, 0) AS `region_id:attr_uint`,
+    IF(v.town_id IS NOT NULL, v.town_id, 0) AS `town_id:attr_uint`,
+    IF(c.name IS NOT NULL, c.name, '') AS `country_text:field`,
+    IF(r.name IS NOT NULL, r.name, '') AS `region_text:field`,
+    IF(t.name IS NOT NULL, t.name, '') AS `town_text:field`,
+    v.payment_from `:attr_uint`,
+    v.payment_to `:attr_uint`,
+    CONCAT_WS(' ', v.payment_from, v.payment_to) AS `payment_text:field`,
+    v.profession AS `profession_text:field`,
+    v.description AS `description_text:field`,
+    v.latitude AS `latitude_deg:attr_float`,
+    v.longitude AS `longitude_deg:attr_float`,
+    RADIANS(v.latitude) AS `latitude_rad:attr_float`,
+    RADIANS(v.longitude) AS `longitude_rad:attr_float`,
+    IFNULL(GROUP_CONCAT(DISTINCT (vl.language_id << 4) | vl.language_level), '0') AS `languages:attr_multi`,
+    IFNULL(GROUP_CONCAT(DISTINCT vcp.catalogue_id), '') AS `catalogues:attr_multi`,
+    IFNULL(GROUP_CONCAT(DISTINCT pc.parent_id), '') AS `catalogues_top:attr_multi`,
+    UNIX_TIMESTAMP(v.created_at) AS `created_at:attr_uint`,
+    UNIX_TIMESTAMP(v.updated_at) AS `updated_at:attr_uint`
+FROM test.vacancy AS v
+LEFT JOIN test.town AS t ON t.id = v.town_id
+LEFT JOIN test.region AS r ON r.id = t.region_id
+LEFT JOIN test.country AS c ON c.id = r.country_id
+LEFT JOIN test.vacancy_language AS vl ON vl.vacancy_id = v.id
+LEFT JOIN test.vacancy_catalogue AS vcp ON v.id = vcp.vacancy_id
+LEFT JOIN test.catalogue AS pc ON pc.id = vcp.catalogue_id
+GROUP BY v.id
+  """
+
+[data_source.vacancy.indexer]
+  mem_limit = "256M"
+  write_buffer = "4M"
+  group_concat_max_len = 65535
+  tokenizer = """
+morphology          = stem_enru
+index_exact_words   = 1
+min_word_len        = 1
+min_prefix_len      = 1
+blend_chars         = U+002E, U+002F
+ignore_chars        = U+2061, U+2062, U+2063, U+AD
+blend_mode          = trim_head, trim_tail, trim_both, skip_pure
+stopwords_unstemmed = 1
+
+charset_table     = 0..9, A..Z->a..z, _, &, a..z, \
+    U+0401->U+0435, U+0451->U+0435, U+0410..U+042F->U+0430..U+044F, U+0430..U+044F, \
+    U+0406->U+0456, U+0456, U+0407->U+0457, U+0457, U+0490->U+0491, U+0491, U+0404->U+0454, U+0454, \
+    U+0023..U+0027, U+002A, U+002B, U+0040, U+005B..U+0060, U+007B, U+007D, U+007E
+
+  """
+
+[data_source.vacancy.indexer.dictionaries]
+  exceptions = "/etc/go-mysql-sphinx/dict/exceptions.txt"
+  stopwords = "/etc/go-mysql-sphinx/dict/stopwords.txt"
+  wordforms = "/etc/go-mysql-sphinx/dict/wordforms.txt"
